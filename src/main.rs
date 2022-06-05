@@ -4,7 +4,7 @@ use tinypxy::*;
 
 use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener};
 use tokio::net::TcpStream;
 
 use byteorder::{BigEndian, ByteOrder};
@@ -14,7 +14,7 @@ use regex::Regex;
 
 use std::env;
 use std::error::Error;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -32,7 +32,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("Failed to transfer; error={}", e);
             }
         });
-
         tokio::spawn(transfer);
     }
 
@@ -83,10 +82,10 @@ async fn handle_socket(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let (server_addr, _, _) = decode_atyp(atyp, len, &buf).unwrap();
+    let (server_name, port) = decode_atyp(atyp, len, &buf).unwrap();
     buf[1] = 0; buf[3] = 1;
     let resp = buf[0..len].to_vec();
-    let transfer = transfer(stream, server_addr, resp).map(|r| {
+    let transfer = transfer(stream, server_name, port, resp).map(|r| {
         if let Err(e) = r {
             println!("Failed to transfer; error={}", e);
         }
@@ -97,16 +96,34 @@ async fn handle_socket(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
 
 async fn handle_http(stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<dyn Error>> {
     lazy_static! {
-        static ref RE_HOST: Regex = Regex::new(r"Host: (.*)(:\d+)\r\n").unwrap();
-        static ref RE_CONN: Regex = Regex::new(r"CONNECT (.*) (HTTP/\d+\.\d+)\r\n").unwrap();
+        static ref RE_HOST: Regex = Regex::new(r"Host: (.*)\r\n").unwrap();
+        static ref RE_CONN: Regex = Regex::new(r"CONNECT (.*) (HTTP/\d*\.\d*)\r\n").unwrap();
     }
     
+    let server_name: String;
+    let mut port: u16 = 80;
+
     let req = std::str::from_utf8(pre_buffer).unwrap();
-    let caps = RE_CONN.captures(req).unwrap();
-    let server_addr = caps[1].to_string();
-    let http_ver = caps[2].to_string();
-    let resp = [http_ver.as_bytes(), " 200 Connection Established\r\n\r\n".as_bytes()].concat();
-    let transfer = transfer(stream_c, server_addr, resp).map(|r| {
+    let server = match RE_CONN.captures(req) {
+        Some(caps) => {
+            caps[1].to_string()
+        }
+        None => {
+            RE_HOST.captures(req).unwrap()[1].to_string()
+        }
+    };
+    let v: Vec<&str> = server.split(':').collect();
+    //info!("HTTP, request {} {} {:?}", server, port, v);
+    if v.len() > 1 {
+        server_name = v[0].to_string();
+        port = v[1].parse().unwrap();
+    } else {
+        server_name = server;
+    }
+    //info!("HTTP, request upstream: {}:{}", server_name, port);
+    
+    let resp: Vec<u8> = ["HTTP/1.1 200 Connection Established\r\n\r\n".as_bytes()].concat();
+    let transfer = transfer(stream_c, server_name, port, resp).map(|r| {
         if let Err(e) = r {
             println!("Failed to transfer; error={}", e);
         }
@@ -115,23 +132,20 @@ async fn handle_http(stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<d
     Ok(())
 }
 
-fn decode_atyp(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, Vec<u8>, Vec<u8>), Box<dyn Error>> {
+fn decode_atyp(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box<dyn Error>> {
     let addr;
-    let ipbuf;
-    let portbuf;
-    let error_ret = (String::from("NULL"), vec![0], vec![0]);
+    let port: u16;
+    let error_ret = (String::from("NULL"), 0);
     match atyp {
         1 => {
             if len != 10 {
                 warn!("invalid proto");
                 return Ok(error_ret);
             }
-            ipbuf = Vec::from([buf[4], buf[5], buf[6], buf[7]]);
-            portbuf = Vec::from(&buf[8..10]);
-
             let dst_addr = IpAddr::V4(Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]));
             let dst_port = BigEndian::read_u16(&buf[8..]);
-            addr = SocketAddr::new(dst_addr, dst_port).to_string();
+            addr = dst_addr.to_string();
+            port = dst_port;
         }
         3 => {
             let offset = 4 + 1 + (buf[4] as usize);
@@ -139,22 +153,17 @@ fn decode_atyp(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, Vec<u8>, Vec
                 warn!("invalid proto");
                 return Ok(error_ret);
             }
-            ipbuf = Vec::from(&buf[5..offset]);
-            portbuf = Vec::from(&buf[offset..offset + 2]);
             let dst_port = BigEndian::read_u16(&buf[offset..]);
-            let mut dst_addr = std::str::from_utf8(&buf[5..offset]).unwrap().to_string();
-            dst_addr.push_str(":");
-            dst_addr.push_str(&dst_port.to_string());
+            let dst_addr = std::str::from_utf8(&buf[5..offset]).unwrap().to_string();
             addr = dst_addr;
+            port = dst_port;
         }
         4 => {
             if len != 22 {
                 warn!("invalid proto");
                 return Ok(error_ret);
             }
-            ipbuf = Vec::from(&buf[4..20]);
-            portbuf = Vec::from(&buf[20..22]);
-            let dst_addr = IpAddr::V6(Ipv6Addr::new(
+            let dst_addr = Ipv6Addr::new(
                 ((buf[4] as u16) << 8) | buf[5] as u16,
                 ((buf[6] as u16) << 8) | buf[7] as u16,
                 ((buf[8] as u16) << 8) | buf[9] as u16,
@@ -163,24 +172,24 @@ fn decode_atyp(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, Vec<u8>, Vec
                 ((buf[14] as u16) << 8) | buf[15] as u16,
                 ((buf[16] as u16) << 8) | buf[17] as u16,
                 ((buf[18] as u16) << 8) | buf[19] as u16,
-            ));
-
+            );
             let dst_port = BigEndian::read_u16(&buf[20..]);
-            addr = SocketAddr::new(dst_addr, dst_port).to_string();
+            addr = dst_addr.to_string();
+            port = dst_port;
         }
         _ => {
             warn!("Address type not supported, type={}", atyp);
             return Ok(error_ret);
         }
     }
-    info!("incoming socket, request upstream: {:?}", addr);
-    Ok((addr, ipbuf, portbuf))
+    info!("incoming socket, request upstream: {}:{}", addr, port);
+    Ok((addr, port))
 }
 
 
-async fn transfer(mut inbound: TcpStream, remote_addr: String, ack_resp: Vec<u8>) -> Result<(), Box<dyn Error>> {
-    let mut outbound = TcpStream::connect(remote_addr).await?;
-
+async fn transfer(mut inbound: TcpStream, remote_name: String, port: u16, ack_resp: Vec<u8>) -> Result<(), Box<dyn Error>> {
+    debug!("transfer({}:{})", remote_name, port);
+    let mut outbound = TcpStream::connect(format!("{}:{}", remote_name, port)).await?;
     inbound.write(&ack_resp).await?;
 
     let (mut ri, mut wi) = inbound.split();
