@@ -38,28 +38,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn handle_socket(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
+async fn handle_socket(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     let mut pre_buffer = [0; 1420];
-    let pre_len = stream.read(&mut pre_buffer).await?;
+    let pre_len = stream_c.read(&mut pre_buffer).await?;
 
     // Health checking
     if pre_len < 4 {
-        stream.shutdown().await?;
+        stream_c.shutdown().await?;
         return Ok(());
     }
 
     // socks5: first handshake begin - x05,x01,x00
     if 1 + 1 + (pre_buffer[1] as usize) != pre_len || pre_buffer[0] != b'\x05' {
-        handle_http(stream, &pre_buffer).await?;
+        handle_http(stream_c, &pre_buffer).await?;
         return Ok(());
     }
 
     // Socket Ack
-    stream.write_all(b"\x05\x00").await?; // version 5, method 0
+    stream_c.write_all(b"\x05\x00").await?; // version 5, method 0
 
     // socks5: first handshake begin
     let mut buf = [0; 1420];
-    let len = stream.read(&mut buf).await?;
+    let len = stream_c.read(&mut buf).await?;
     if len <= 4 {
         warn!("invalid proto");
         return Ok(());
@@ -70,22 +70,24 @@ async fn handle_socket(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
     let atyp = buf[3]; // type of the dist server 1-ipv4 3-domain 4-ipv6
 
     if ver != b'\x05' {
-        stream.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
-        stream.shutdown().await?;
+        stream_c.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
+        stream_c.shutdown().await?;
         return Ok(());
     }
 
     if cmd != 1 {
         warn!("Command not supported");
-        stream.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
-        stream.shutdown().await?;
+        stream_c.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
+        stream_c.shutdown().await?;
         return Ok(());
     }
 
     let (server_name, port) = decode_atyp(atyp, len, &buf).unwrap();
+    let stream_s = TcpStream::connect(format!("{}:{}", server_name, port)).await?;
     buf[1] = 0; buf[3] = 1;
     let resp = buf[0..len].to_vec();
-    let transfer = transfer(stream, server_name, port, resp).map(|r| {
+    stream_c.write_all(&resp).await?;
+    let transfer = transfer(stream_c, stream_s).map(|r| {
         if let Err(e) = r {
             println!("Failed to transfer; error={}", e);
         }
@@ -94,7 +96,7 @@ async fn handle_socket(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn handle_http(stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<dyn Error>> {
+async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<dyn Error>> {
     lazy_static! {
         static ref RE_HOST: Regex = Regex::new(r"Host: (.*)\r\n").unwrap();
         static ref RE_CONN: Regex = Regex::new(r"CONNECT (.*) (HTTP/\d*\.\d*)\r\n").unwrap();
@@ -102,6 +104,8 @@ async fn handle_http(stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<d
     
     let server_name: String;
     let mut port: u16 = 80;
+    let mut is_conn = 1;
+    let mut resp: Vec<u8> = "HTTP/1.1 200 Connection Established\r\n\r\n".into();
 
     let req = std::str::from_utf8(pre_buffer).unwrap();
     let server = match RE_CONN.captures(req) {
@@ -109,6 +113,8 @@ async fn handle_http(stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<d
             caps[1].to_string()
         }
         None => {
+            is_conn = 0;
+            resp = "HTTP/1.1 100 Continue\r\n\r\n".into();
             RE_HOST.captures(req).unwrap()[1].to_string()
         }
     };
@@ -121,9 +127,12 @@ async fn handle_http(stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<d
         server_name = server;
     }
     //info!("HTTP, request upstream: {}:{}", server_name, port);
-    
-    let resp: Vec<u8> = ["HTTP/1.1 200 Connection Established\r\n\r\n".as_bytes()].concat();
-    let transfer = transfer(stream_c, server_name, port, resp).map(|r| {
+    let mut stream_s = TcpStream::connect(format!("{}:{}", server_name, port)).await?;
+    if 0 == is_conn {
+        stream_s.write_all(pre_buffer).await?;
+    }
+    stream_c.write_all(&resp).await?;
+    let transfer = transfer(stream_c, stream_s).map(|r| {
         if let Err(e) = r {
             println!("Failed to transfer; error={}", e);
         }
@@ -187,10 +196,12 @@ fn decode_atyp(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box<dy
 }
 
 
-async fn transfer(mut inbound: TcpStream, remote_name: String, port: u16, ack_resp: Vec<u8>) -> Result<(), Box<dyn Error>> {
-    debug!("transfer({}:{})", remote_name, port);
-    let mut outbound = TcpStream::connect(format!("{}:{}", remote_name, port)).await?;
-    inbound.write(&ack_resp).await?;
+async fn transfer(mut inbound: TcpStream, mut outbound: TcpStream) -> Result<(), Box<dyn Error>> {
+    //debug!("transfer({}:{})", remote_name, port);
+    //let mut outbound = TcpStream::connect(format!("{}:{}", remote_name, port)).await?;
+    //if ack_resp.len() > 0 {
+    //    inbound.write_all(&ack_resp).await?;
+    //}
 
     let (mut ri, mut wi) = inbound.split();
     let (mut ro, mut wo) = outbound.split();
