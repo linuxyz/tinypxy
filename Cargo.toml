@@ -1,0 +1,22 @@
+[package]
+name = "tinypxy"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+byteorder = "1"
+futures = { version = "0.3", features = ["thread-pool"]}
+lazy_static = "1.4.0"
+rand = "0.8.5"
+regex = "1"
+rust-crypto = "0.2"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+incremental = false
+opt-level = "s"
