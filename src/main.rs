@@ -43,7 +43,7 @@ async fn handle_socket(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     let pre_len = stream_c.read(&mut pre_buffer).await?;
 
     // Health checking
-    if pre_len < 4 {
+    if pre_len < 3 {
         stream_c.shutdown().await?;
         return Ok(());
     }
@@ -84,9 +84,9 @@ async fn handle_socket(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
 
     let (server_name, port) = decode_atyp(atyp, len, &buf).unwrap();
     let stream_s = TcpStream::connect(format!("{}:{}", server_name, port)).await?;
-    buf[1] = 0; buf[3] = 1;
-    let resp = buf[0..len].to_vec();
-    stream_c.write_all(&resp).await?;
+    // hard-coded remote address
+    buf[0] = 5; buf[1] = 0; buf[3] = 1; buf[4] = 0; buf[5] = 0; buf[6] = 0; buf[7] = 0; buf[8] = 0; buf[9] = 0;
+    stream_c.write_all(&buf[0..10]).await?;
     let transfer = transfer(stream_c, stream_s).map(|r| {
         if let Err(e) = r {
             println!("Failed to transfer; error={}", e);
