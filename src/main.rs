@@ -10,7 +10,7 @@ use tokio::net::TcpStream;
 use byteorder::{BigEndian, ByteOrder};
 use futures::FutureExt;
 use lazy_static::lazy_static;
-use regex::Regex;
+use regex::bytes::Regex;
 
 use std::env;
 use std::error::Error;
@@ -48,8 +48,8 @@ async fn handshake(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // SOCKS5: first handshake begin - x05,x01,x00
-    if pre_buffer[0] == b'\x05' && pre_buffer[1] == b'\x01' && pre_buffer[2] == b'\x00' {
+    // SOCKS5: first handshake begin - x05,x01,x00 || x05,x02,x00,x01
+    if pre_buffer[0] == b'\x05' {
         // SOCKS5 Proxy
         handle_socks(stream_c).await?;
     } else {
@@ -99,31 +99,41 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
 
 async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<dyn Error>> {
     lazy_static! {
-        static ref RE_HOST: Regex = Regex::new(r"Host: (.*)\r\n").unwrap();
-        static ref RE_CONN: Regex = Regex::new(r"CONNECT (.*) (HTTP/\d*\.\d*)\r\n").unwrap();
+        static ref RE_HOST: Regex = Regex::new(r"\nHost: (.*)\r\n").unwrap();
+        static ref RE_CONN: Regex = Regex::new(r"^CONNECT (.*) (HTTP/\d*\.\d*)\r\n").unwrap();
     }
-    
+
+    // request validation
+    if pre_buffer.len() < 8 {
+        stream_c.write_all(b"HTTP/1.1 400 Invalid Request\r\n\r\n").await?;
+        stream_c.shutdown().await?;
+        return Ok(());
+    }
+
     let mut is_conn = 1;
     let mut resp: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
-    let req = std::str::from_utf8(pre_buffer).unwrap();
-    let mut server = match RE_CONN.captures(req) {
+    // Try CONNECT method for HTTPS
+    let server_name = match RE_CONN.captures(pre_buffer) {
         Some(caps) => {
-            caps[1].to_string()
+            caps[1].to_vec()
         }
         None => {
+           // GET method with HTTP
             is_conn = 0;
             resp = b"HTTP/1.1 100 Continue\r\n\r\n";
-            RE_HOST.captures(req).unwrap()[1].to_string()
+            RE_HOST.captures(pre_buffer).unwrap()[1].to_vec()
         }
     };
-    //info!("HTTP, request {} {} {:?}", server, port, v);
-    if server.find(':').is_none()  {
-        // If no port specified, use default HTTP:80
-        server.push_str(":80");
+
+    let mut full_name = String::from_utf8(server_name).unwrap();
+    //info!("HTTP, request {} {} {:?}", server, port, v)
+    if full_name.find(':').is_none()  {
+        // If no port specified, use default HTTP:8
+        full_name.push_str(":80");
     }
     //info!("HTTP, request upstream: {}:{}", server_name, port);
-    let mut stream_s = TcpStream::connect(server).await?;
+    let mut stream_s = TcpStream::connect(full_name).await?;
     // None CONNECT mode, we should forward the request to server directly.
     if 0 == is_conn {
         stream_s.write_all(pre_buffer).await?;
@@ -185,7 +195,7 @@ fn decode_address(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box
             return Ok(error_ret);
         }
     }
-    info!("incoming socket, request upstream: {}:{}", addr, port);
+    //info!("incoming socket, request upstream: {}:{}", addr, port);
     Ok((addr, port))
 }
 
