@@ -1,0 +1,19 @@
+[Unit]
+Description=TinyPxy HTTP+SOCKS5 proxy at %i
+After=network.target
+StartLimitIntervalSec=1
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=1
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+Group=nogroup
+DynamicUser=true
+LimitNOFILE=32768
+ExecStart=/usr/local/bin/tinypxy 0.0.0.0:%i
+
+[Install]
+WantedBy=multi-user.target
+
