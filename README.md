@@ -22,6 +22,12 @@ Start the *tinypxy* and listen on TCP:8081
 or execute the *tinypxy* execution directly.
  `tinypxy 0.0.0.0:1080` 
 
+## Run with systemd
+
+The `contrib/tinypxy@.service` is provided as an exmple systemd unit definition. 
+Please copy it to `/etc/systemd/system/`, then use `systemctl start tinypxy@8088`
+Here `8088` can be replaced with the prfered TCP port number.
+
 # License
 *tinypxy* is distributed under the terms of both the MIT license and the Apache License (Version 2.0).
 

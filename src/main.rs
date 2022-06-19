@@ -67,7 +67,7 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     let mut buf = [0; 1420];
     let len = stream_c.read(&mut buf).await?;
     if len <= 4 {
-        warn!("invalid proto");
+        warn!("invalid proto: first message is too short");
         return Ok(());
     }
 
@@ -152,7 +152,7 @@ fn decode_address(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box
     match atyp {
         1 => {
             if len != 10 {
-                warn!("invalid proto");
+                warn!("invalid IPv4 address length");
                 return Ok(error_ret);
             }
             let dst_addr = IpAddr::V4(Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]));
@@ -163,7 +163,7 @@ fn decode_address(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box
         3 => {
             let offset = 4 + 1 + (buf[4] as usize);
             if offset + 2 != len {
-                warn!("invalid proto");
+                warn!("invalid domain name length");
                 return Ok(error_ret);
             }
             let dst_port = BigEndian::read_u16(&buf[offset..]);
@@ -173,7 +173,7 @@ fn decode_address(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box
         }
         4 => {
             if len != 22 {
-                warn!("invalid proto");
+                warn!("invalid IPv6 address length");
                 return Ok(error_ret);
             }
             let dst_addr = Ipv6Addr::new(
