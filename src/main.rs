@@ -91,13 +91,14 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     }
 
     if cmd != 1 {
-        warn!("Command not supported");
+        warn!("SOCKS5 command not supported");
         stream_c.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
         stream_c.shutdown().await?;
         return Ok(());
     }
 
     let (server_name, port) = decode_address(atyp, len, &buf).unwrap();
+    debug!("SOCKS5 from {:?} to {}:{:?}", stream_c.peer_addr()?, server_name, port);
     let stream_s = TcpStream::connect(format!("{}:{}", server_name, port)).await?;
     // hard-coded remote address
     stream_c.write_all(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00").await?;
@@ -142,6 +143,7 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
         full_name.push_str(":80");
     }
     //info!("HTTP, request upstream: {}:{}", server_name, port);
+    debug!("HTTP from {:?} to {:?}", stream_c.peer_addr()?, full_name);
     let mut stream_s = TcpStream::connect(full_name).await?;
     // None CONNECT mode, we should forward the request to server directly.
     if 0 == is_conn {
