@@ -1,22 +1,23 @@
 [package]
 name = "tinypxy"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
+description = "Tiny SOCKS5+HTTP Proxy Server"
+homepage = "https://github.com/linuxyz/tinypxy"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
+socket2 = "0.4"
 byteorder = "1"
 futures = { version = "0.3", features = ["thread-pool"]}
-lazy_static = "1.4.0"
-#rand = "0.8.5"
+lazy_static = "1.4"
 regex = "1"
-#rust-crypto = "0.2"
 
 [profile.release]
-panic = "abort"
 codegen-units = 1
-lto = true
 incremental = false
+lto = true
 opt-level = "s"
+panic = "abort"

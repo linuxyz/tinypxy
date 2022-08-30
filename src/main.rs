@@ -2,10 +2,12 @@
 
 use tinypxy::*;
 
+use std::net::{SocketAddr, TcpListener};
+use socket2::{Socket, Domain, Type};
+
 use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener};
-use tokio::net::TcpStream;
+use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 
 use byteorder::{BigEndian, ByteOrder};
 use futures::FutureExt;
@@ -18,23 +20,31 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let listen_addr = env::args()
+    let listen_addr : SocketAddr = env::args()
         .nth(1)
-        .unwrap_or_else(|| "0.0.0.0:8081".to_string());
+        .unwrap_or_else(|| "0.0.0.0:2080".to_string())
+        .parse().unwrap();
 
     println!("TinyPxy listen at: {}", listen_addr);
 
-    let listener = TcpListener::bind(listen_addr).await?;
+    // Start from socket2 for REUSEPORT and backlog
+    let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
+    socket.set_only_v6(false)?;
+    socket.reuse_address()?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&listen_addr.into())?;
+    socket.listen(512)?;
+    let std_listener : TcpListener = socket.into();
 
-    while let Ok((inbound, _)) = listener.accept().await {
-        let transfer = handshake(inbound).map(|r| {
-            if let Err(e) = r {
-                println!("Failed to transfer; error={}", e);
-            }
-        });
+    let listener = TokioTcpListener::from_std(std_listener)?;
+    while let Ok((inbound, addr)) = listener.accept().await {
+        let transfer = handshake(inbound)
+            .map(move |r| {
+                if let Err(e) = r {
+                    println!("Failed to transfer with: {:?} error: {:?}", addr, e);
+                }});
         tokio::spawn(transfer);
     }
-
     Ok(())
 }
 
