@@ -28,8 +28,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     println!("TinyPxy listen at: {}", listen_addr);
 
     // Start from socket2 for REUSEPORT and backlog
-    let socket = Socket::new(Domain::IPV6, Type::STREAM, None)?;
-    socket.set_only_v6(false)?;
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
     socket.reuse_address()?;
     socket.set_nonblocking(true)?;
     socket.bind(&listen_addr.into())?;
@@ -223,5 +222,7 @@ async fn transfer(mut inbound: TcpStream, mut outbound: TcpStream) -> Result<(),
     };
 
     tokio::try_join!(client_to_server, server_to_client)?;
+    inbound.shutdown().await?;
+    outbound.shutdown().await?;
     Ok(())
 }
