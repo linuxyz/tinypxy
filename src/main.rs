@@ -100,6 +100,8 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     let (server_name, port) = decode_address(atyp, len, &buf).unwrap();
     debug!("SOCKS5 from {:?} to {}:{:?}", stream_c.peer_addr()?, server_name, port);
     let stream_s = TcpStream::connect(format!("{}:{}", server_name, port)).await?;
+    // wait until connected
+    stream_s.writable().await?;
     // hard-coded remote address
     stream_c.write_all(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00").await?;
     // Connected
@@ -109,8 +111,8 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
 
 async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<dyn Error>> {
     lazy_static! {
-        static ref RE_HOST: Regex = Regex::new(r"\nHost: (.*)\r\n").unwrap();
-        static ref RE_CONN: Regex = Regex::new(r"^CONNECT (.*) (HTTP/\d*\.\d*)\r\n").unwrap();
+        static ref RE_HOST: Regex = Regex::new(r"(?i)\nHost:\s+(.*)\r\n").unwrap();
+        static ref RE_CONN: Regex = Regex::new(r"^CONNECT\s+(.*)\s+(HTTP/.*)\r\n").unwrap();
     }
 
     // request validation
@@ -123,28 +125,35 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
     let mut is_conn = 1;
     let mut resp: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
+    let mut rport: u16 = 443;
     // Try CONNECT method for HTTPS
     let server_name = match RE_CONN.captures(pre_buffer) {
         Some(caps) => {
-            caps[1].to_vec()
+            caps.get(1).unwrap().as_bytes()
         }
         None => {
            // GET method with HTTP
             is_conn = 0;
+            rport = 80;
             resp = b"HTTP/1.1 100 Continue\r\n\r\n";
-            RE_HOST.captures(pre_buffer).unwrap()[1].to_vec()
+            RE_HOST.captures(pre_buffer).unwrap().get(1).unwrap().as_bytes()
         }
     };
 
-    let mut full_name = String::from_utf8(server_name).unwrap();
+    let full_name = std::str::from_utf8(server_name).unwrap();
     //info!("HTTP, request {} {} {:?}", server, port, v)
-    if full_name.find(':').is_none()  {
-        // If no port specified, use default HTTP:8
-        full_name.push_str(":80");
+    let pos = full_name.find(':').unwrap_or(full_name.len());
+    let (rhost, srport) = full_name.split_at(pos);
+    {
+        if srport.len() > 0 {
+            rport = srport[1..].parse::<u16>().unwrap();
+        }
     }
     //info!("HTTP, request upstream: {}:{}", server_name, port);
-    debug!("HTTP from {:?} to {:?}", stream_c.peer_addr()?, full_name);
-    let mut stream_s = TcpStream::connect(full_name).await?;
+    debug!("HTTP from {:?} to {:?}:{:?}", stream_c.peer_addr()?, rhost, rport);
+    let mut stream_s = TcpStream::connect((rhost, rport)).await?;
+    // Make sure connected with remote.
+    stream_s.writable().await?;
     // None CONNECT mode, we should forward the request to server directly.
     if 0 == is_conn {
         stream_s.write_all(pre_buffer).await?;
