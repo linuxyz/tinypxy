@@ -2,15 +2,14 @@
 
 use tinypxy::*;
 
+use socket2::{Domain, Socket, Type};
 use std::net::{SocketAddr, TcpListener};
-use socket2::{Socket, Domain, Type};
 
 use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
 
 use byteorder::{BigEndian, ByteOrder};
-use futures::FutureExt;
 use lazy_static::lazy_static;
 use regex::bytes::Regex;
 
@@ -20,10 +19,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    let listen_addr : SocketAddr = env::args()
+    let listen_addr: SocketAddr = env::args()
         .nth(1)
         .unwrap_or_else(|| "0.0.0.0:2080".to_string())
-        .parse().unwrap();
+        .parse()
+        .unwrap();
 
     println!("TinyPxy listen at: {}", listen_addr);
 
@@ -33,16 +33,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     socket.set_nonblocking(true)?;
     socket.bind(&listen_addr.into())?;
     socket.listen(512)?;
-    let std_listener : TcpListener = socket.into();
+    let std_listener: TcpListener = socket.into();
 
     let listener = TokioTcpListener::from_std(std_listener)?;
     while let Ok((inbound, addr)) = listener.accept().await {
-        let transfer = handshake(inbound)
-            .map(move |r| {
-                if let Err(e) = r {
-                    println!("Failed to transfer with: {:?} error: {:?}", addr, e);
-                }});
-        tokio::spawn(transfer);
+        tokio::spawn(async move {
+            if let Err(e) = handshake(inbound).await {
+                println!("Failed to transfer with: {:?} error: {:?}", addr, e);
+            }
+        });
     }
     Ok(())
 }
@@ -82,7 +81,7 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
 
     let ver = buf[0]; // version
     let cmd = buf[1]; // command code 1-connect 2-bind 3-udp forward
-    let atyp = buf[3]; // type of the dist server 1-ipv4 3-domain 4-ipv6
+    let atype = buf[3]; // type of the dist server 1-ipv4 3-domain 4-ipv6
 
     if ver != b'\x05' {
         stream_c.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
@@ -97,9 +96,9 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let (server_name, port) = decode_address(atyp, len, &buf).unwrap();
-    debug!("SOCKS5 from {:?} to {}:{:?}", stream_c.peer_addr()?, server_name, port);
-    let stream_s = TcpStream::connect(format!("{}:{}", server_name, port)).await?;
+    let soaddr = decode_address(atype, len, &buf).await?;
+    debug!("SOCKS5 from {:?} to {:?}", stream_c.peer_addr()?, soaddr);
+    let stream_s = TcpStream::connect(soaddr).await?;
     // wait until connected
     stream_s.writable().await?;
     // hard-coded remote address
@@ -128,11 +127,9 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
     let mut rport: u16 = 443;
     // Try CONNECT method for HTTPS
     let server_name = match RE_CONN.captures(pre_buffer) {
-        Some(caps) => {
-            caps.get(1).unwrap().as_bytes()
-        }
+        Some(caps) => caps.get(1).unwrap().as_bytes(),
         None => {
-           // GET method with HTTP
+            // GET method with HTTP
             is_conn = 0;
             rport = 80;
             resp = b"HTTP/1.1 100 Continue\r\n\r\n";
@@ -144,10 +141,8 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
     //info!("HTTP, request {} {} {:?}", server, port, v)
     let pos = full_name.find(':').unwrap_or(full_name.len());
     let (rhost, srport) = full_name.split_at(pos);
-    {
-        if srport.len() > 0 {
-            rport = srport[1..].parse::<u16>().unwrap();
-        }
+    if srport.len() > 0 {
+        rport = srport[1..].parse::<u16>().unwrap();
     }
     //info!("HTTP, request upstream: {}:{}", server_name, port);
     debug!("HTTP from {:?} to {:?}:{:?}", stream_c.peer_addr()?, rhost, rport);
@@ -165,36 +160,32 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
     Ok(())
 }
 
-fn decode_address(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box<dyn Error>> {
-    let addr;
-    let port: u16;
-    let error_ret = (String::from("NULL"), 0);
-    match atyp {
+async fn decode_address(atype: u8, len: usize, buf: &[u8]) -> Result<SocketAddr, Box<dyn Error>> {
+    match atype {
         1 => {
             if len != 10 {
-                warn!("invalid IPv4 address length");
-                return Ok(error_ret);
+                return Err("invalid IPv4 address length")?;
             }
-            let dst_addr = IpAddr::V4(Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7]));
-            let dst_port = BigEndian::read_u16(&buf[8..]);
-            addr = dst_addr.to_string();
-            port = dst_port;
+            Ok(SocketAddr::new(
+                IpAddr::V4(Ipv4Addr::new(buf[4], buf[5], buf[6], buf[7])),
+                BigEndian::read_u16(&buf[8..]),
+            ))
         }
         3 => {
             let offset = 4 + 1 + (buf[4] as usize);
             if offset + 2 != len {
-                warn!("invalid domain name length");
-                return Ok(error_ret);
+                Err("invalid domain name length")?
             }
-            let dst_port = BigEndian::read_u16(&buf[offset..]);
-            let dst_addr = std::str::from_utf8(&buf[5..offset]).unwrap().to_string();
-            addr = dst_addr;
-            port = dst_port;
+            let port = BigEndian::read_u16(&buf[offset..]);
+            let rhost = std::str::from_utf8(&buf[5..offset]).unwrap();
+            match std::net::ToSocketAddrs::to_socket_addrs(&(rhost, port)) {
+                Err(_) => Err(format!("Unresolved remote host: {}", rhost))?,
+                Ok(mut iter) => Ok(iter.next().unwrap())
+            }
         }
         4 => {
             if len != 22 {
-                warn!("invalid IPv6 address length");
-                return Ok(error_ret);
+                return Err("invalid IPv6 address length")?;
             }
             let dst_addr = Ipv6Addr::new(
                 ((buf[4] as u16) << 8) | buf[5] as u16,
@@ -206,17 +197,15 @@ fn decode_address(atyp: u8, len: usize, buf: &[u8]) -> Result<(String, u16), Box
                 ((buf[16] as u16) << 8) | buf[17] as u16,
                 ((buf[18] as u16) << 8) | buf[19] as u16,
             );
-            let dst_port = BigEndian::read_u16(&buf[20..]);
-            addr = dst_addr.to_string();
-            port = dst_port;
+            Ok(SocketAddr::new(
+                IpAddr::V6(dst_addr),
+                BigEndian::read_u16(&buf[20..]),
+            ))
         }
         _ => {
-            warn!("Address type not supported, type={}", atyp);
-            return Ok(error_ret);
+            Err(format!("Address type not supported, type={}", atype))?
         }
     }
-    //info!("incoming socket, request upstream: {}:{}", addr, port);
-    Ok((addr, port))
 }
 
 async fn transfer(mut inbound: TcpStream, mut outbound: TcpStream) -> Result<(), Box<dyn Error>> {
