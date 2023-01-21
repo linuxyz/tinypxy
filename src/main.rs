@@ -16,6 +16,7 @@ use regex::bytes::Regex;
 use std::env;
 use std::error::Error;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -113,6 +114,7 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
         static ref RE_HOST: Regex = Regex::new(r"(?i)\nHost:\s+(.*)\r\n").unwrap();
         static ref RE_CONN: Regex = Regex::new(r"^CONNECT\s+(.*)\s+(HTTP/.*)\r\n").unwrap();
     }
+    const HTTP_CONNECT: &[u8] = "CONNECT ".as_bytes();
 
     // request validation
     if pre_buffer.len() < 8 {
@@ -126,19 +128,18 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
 
     let mut rport: u16 = 443;
     // Try CONNECT method for HTTPS
-    let server_name = match RE_CONN.captures(pre_buffer) {
-        Some(caps) => caps.get(1).unwrap().as_bytes(),
-        None => {
-            // GET method with HTTP
-            is_conn = 0;
-            rport = 80;
-            resp = b"HTTP/1.1 100 Continue\r\n\r\n";
-            RE_HOST.captures(pre_buffer).unwrap().get(1).unwrap().as_bytes()
-        }
+    let server_name = if pre_buffer.starts_with(HTTP_CONNECT) {
+        let end = pre_buffer[9..].iter().position(|&c| c == 0x20).unwrap() + 9;
+        &pre_buffer[8..end]
+    } else {
+        // GET method with HTTP
+        is_conn = 0;
+        rport = 80;
+        resp = b"HTTP/1.1 100 Continue\r\n\r\n";
+        RE_HOST.captures(pre_buffer).unwrap().get(1).unwrap().as_bytes()
     };
-
-    let full_name = std::str::from_utf8(server_name).unwrap();
-    //info!("HTTP, request {} {} {:?}", server, port, v)
+    let full_name = str::from_utf8(server_name).unwrap();
+    //info!("HTTP, request {:?} {:?}", server_name, full_name);
     let pos = full_name.find(':').unwrap_or(full_name.len());
     let (rhost, srport) = full_name.split_at(pos);
     if srport.len() > 0 {
