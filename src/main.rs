@@ -60,12 +60,11 @@ async fn handshake(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     // SOCKS5: first handshake begin - x05,x01,x00 || x05,x02,x00,x01
     if pre_buffer[0] == b'\x05' {
         // SOCKS5 Proxy
-        handle_socks(stream_c).await?;
+        handle_socks(stream_c).await
     } else {
         // HTTP Proxy
-        handle_http(stream_c, &pre_buffer).await?;
+        handle_http(stream_c, &pre_buffer).await
     }
-    Ok(())
 }
 
 async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
@@ -105,8 +104,7 @@ async fn handle_socks(mut stream_c: TcpStream) -> Result<(), Box<dyn Error>> {
     // hard-coded remote address
     stream_c.write_all(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00").await?;
     // Connected
-    transfer(stream_c, stream_s).await?;
-    Ok(())
+    transfer(stream_c, stream_s).await
 }
 
 async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), Box<dyn Error>> {
@@ -157,8 +155,7 @@ async fn handle_http(mut stream_c: TcpStream, pre_buffer: &[u8]) -> Result<(), B
     // Response to client: HTTP Proxy - HTTP/1.1 100; CONNECT - HTTP/1.1 200
     stream_c.write_all(&resp).await?;
     // Connected
-    transfer(stream_c, stream_s).await?;
-    Ok(())
+    transfer(stream_c, stream_s).await
 }
 
 async fn decode_address(atype: u8, len: usize, buf: &[u8]) -> Result<SocketAddr, Box<dyn Error>> {
@@ -222,7 +219,15 @@ async fn transfer(mut inbound: TcpStream, mut outbound: TcpStream) -> Result<(),
         wi.shutdown().await
     };
 
-    tokio::try_join!(client_to_server, server_to_client)?;
+    let ret = tokio::try_join!(client_to_server, server_to_client);
+    match ret {
+         Ok((_first, _second)) => {
+            // do something with the values
+         }
+         Err(err) => {
+            warn!("Transfer failed! {:?}=>{:?} error={} ", inbound, outbound, err);
+         }
+    }
     inbound.shutdown().await?;
     outbound.shutdown().await?;
     Ok(())
