@@ -224,13 +224,25 @@ async fn setup_bridge(mut bridge: TcpBridge, pre_len: usize, resp: &[u8]) -> Res
 
     //info!("Connect remote {:?} {:?}", stream_s, bridge);
     // Make sure connected with remote.
-    stream_s.writable().await?;
+    if let Err(e) = stream_s.writable().await {
+        bridge.inbound.shutdown().await?;
+        stream_s.shutdown().await?;
+        Err(format!("Cannot writable (outbound) to {}:{}|{:?}, Error:{:?}", bridge.remote_name, bridge.remote_port, bridge.remote_addr, e))?
+    }
     // None CONNECT mode, we should forward the request to server directly.
     if pre_len > 0 {
-        stream_s.write(&bridge.msg_buffer[..pre_len]).await?;
+        if let Err(e) = stream_s.write_all(&bridge.msg_buffer[..pre_len]).await {
+            bridge.inbound.shutdown().await?;
+            stream_s.shutdown().await?;
+            Err(format!("Cannot write (outbound) to {}:{}|{:?}, Error:{:?}", bridge.remote_name, bridge.remote_port, bridge.remote_addr, e))?
+        }
     }
     // Response to client: HTTP Proxy - HTTP/1.1 100; CONNECT - HTTP/1.1 200
-    bridge.inbound.write_all(&resp).await?;
+    if let Err(e) = bridge.inbound.write_all(&resp).await {
+        bridge.inbound.shutdown().await?;
+        stream_s.shutdown().await?;
+        Err(format!("Cannot write (inbound) to {}:{}|{:?}, Error:{:?}", bridge.remote_name, bridge.remote_port, bridge.remote_addr, e))?
+    }
     // Connected
     transfer(bridge, stream_s).await
 }
