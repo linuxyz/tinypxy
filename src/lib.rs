@@ -26,10 +26,10 @@ macro_rules! md5 {
 
 pub fn is_normal_close(e: &std::io::Error) -> bool {
     matches!(
-      e.kind(),
-      std::io::ErrorKind::BrokenPipe
-        | std::io::ErrorKind::UnexpectedEof
-        | std::io::ErrorKind::ConnectionReset
+        e.kind(),
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
     )
 }
 
