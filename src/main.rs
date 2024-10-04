@@ -5,9 +5,9 @@ use tinypxy::*;
 use socket2::{Domain, Socket, Type};
 use std::net::{SocketAddr, TcpListener};
 
-use tokio::io;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener as TokioTcpListener, TcpStream};
+use tokio_splice::zero_copy_bidirectional;
 
 use byteorder::{BigEndian, ByteOrder};
 use lazy_static::lazy_static;
@@ -154,13 +154,19 @@ async fn handle_socks(mut bridge: TcpBridge) -> Result<TcpBridge, Box<dyn Error>
 
     let ver = bridge.msg_buffer[0]; // version
     if ver != b'\x05' {
-        bridge.inbound.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
+        bridge
+            .inbound
+            .write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+            .await?;
         Err("SOCKS_PROXY Unsupported SOCKS version!")?
     }
 
     let cmd = bridge.msg_buffer[1]; // command code 1-connect 2-bind 3-udp forward
     if cmd != 1 {
-        bridge.inbound.write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00").await?;
+        bridge
+            .inbound
+            .write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+            .await?;
         Err("SOCKS_PROXY Unsupported SOCKS5 command!")?
     }
 
@@ -184,7 +190,10 @@ async fn handle_http(
 
     // request validation
     if bridge.msg_buffer.len() < 8 {
-        bridge.inbound.write_all(b"HTTP/1.1 400 Invalid Request\r\n\r\n").await?;
+        bridge
+            .inbound
+            .write_all(b"HTTP/1.1 400 Invalid Request\r\n\r\n")
+            .await?;
         Err(format!("HTTP_PROXY invalid request length={}", pre_len))?
     }
 
@@ -202,7 +211,8 @@ async fn handle_http(
         // GET method with HTTP
         is_conn = 0;
         rport = 80;
-        RE_HOST.captures(&bridge.msg_buffer)
+        RE_HOST
+            .captures(&bridge.msg_buffer)
             .unwrap()
             .get(1)
             .unwrap()
@@ -254,7 +264,8 @@ async fn setup_bridge(
     if let Err(e) = stream_s.writable().await {
         bridge.inbound.shutdown().await?;
         stream_s.shutdown().await?;
-        Err(format!("Cannot writable (outbound) to {}:{}|{:?}, Error:{:?}",
+        Err(format!(
+            "Cannot writable (outbound) to {}:{}|{:?}, Error:{:?}",
             bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
         ))?
     }
@@ -263,7 +274,8 @@ async fn setup_bridge(
         if let Err(e) = stream_s.write_all(&bridge.msg_buffer[..pre_len]).await {
             bridge.inbound.shutdown().await?;
             stream_s.shutdown().await?;
-            Err(format!("Cannot write (outbound) to {}:{}|{:?}, Error:{:?}",
+            Err(format!(
+                "Cannot write (outbound) to {}:{}|{:?}, Error:{:?}",
                 bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
             ))?
         }
@@ -272,42 +284,14 @@ async fn setup_bridge(
     if let Err(e) = bridge.inbound.write_all(&resp).await {
         bridge.inbound.shutdown().await?;
         stream_s.shutdown().await?;
-        Err(format!("Cannot write (inbound) to {}:{}|{:?}, Error:{:?}",
+        Err(format!(
+            "Cannot write (inbound) to {}:{}|{:?}, Error:{:?}",
             bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
         ))?
     }
     // Connected
-    transfer(bridge, stream_s).await
-}
-
-async fn transfer(
-    mut bridge: TcpBridge,
-    mut outbound: TcpStream,
-) -> Result<TcpBridge, Box<dyn Error>> {
-    let (mut ri, mut wi) = bridge.inbound.split();
-    let (mut ro, mut wo) = outbound.split();
-
-    let client_to_server = async {
-        io::copy(&mut ri, &mut wo).await?;
-        wo.shutdown().await
-    };
-    let server_to_client = async {
-        io::copy(&mut ro, &mut wi).await?;
-        wi.shutdown().await
-    };
-
-    let ret = tokio::try_join!(client_to_server, server_to_client);
-    match ret {
-        Ok((_first, _second)) => {
-            // do something with the values
-        }
-        Err(e) => {
-            warn!("Transfer error {}:{}|{:?}, Error:{:?}",
-                bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
-            );
-        }
-    }
+    zero_copy_bidirectional(&mut bridge.inbound, &mut stream_s).await?;
+    stream_s.shutdown().await?;
     bridge.inbound.shutdown().await?;
-    outbound.shutdown().await?;
     Ok(bridge)
 }
