@@ -108,8 +108,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             msg_buffer: [0; 1420],
         };
         tokio::spawn(async move {
-            if let Err(_) = process(bridge, in_addr).await {
-                warn!("Exception to process remote request!")
+            if let Err(e) = process(bridge, in_addr).await {
+                warn!("Exception - {}", e)
             }
         });
     }
@@ -143,13 +143,14 @@ async fn handle_socks(mut bridge: TcpBridge) -> Result<TcpBridge, Box<dyn Error>
     // Socket Ack
     if let Err(e) = bridge.inbound.write_all(b"\x05\x00").await {
         // version 5, method 0
-        Err(e)?
+        Err(format!("SOCKS {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, e))?
     }
 
     // socks5: connect request handshake begin
     let len = bridge.inbound.read(&mut bridge.msg_buffer).await?;
     if len <= 4 {
-        Err("SOCKS_PROXY first message is too short!")?
+        Err(format!("SOCKS {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, 
+            "SOCKS_PROXY first message is too short!"))?
     }
 
     let ver = bridge.msg_buffer[0]; // version
@@ -158,7 +159,8 @@ async fn handle_socks(mut bridge: TcpBridge) -> Result<TcpBridge, Box<dyn Error>
             .inbound
             .write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
             .await?;
-        Err("SOCKS_PROXY Unsupported SOCKS version!")?
+        Err(format!("SOCKS {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, 
+            "SOCKS_PROXY Unsupported SOCKS version!"))?
     }
 
     let cmd = bridge.msg_buffer[1]; // command code 1-connect 2-bind 3-udp forward
@@ -167,12 +169,13 @@ async fn handle_socks(mut bridge: TcpBridge) -> Result<TcpBridge, Box<dyn Error>
             .inbound
             .write_all(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
             .await?;
-        Err("SOCKS_PROXY Unsupported SOCKS5 command!")?
+        Err(format!("SOCKS {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, 
+            "SOCKS_PROXY Unsupported SOCKS5 command!"))?
     }
 
     // Decode the remote address
     if let Err(e) = bridge.decode_address(len) {
-        Err(e)?
+        Err(format!("SOCKS {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, e))?
     }
     // hard-coded remote address if connect remote successfully
     setup_bridge(bridge, 0, b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00").await
@@ -194,7 +197,8 @@ async fn handle_http(
             .inbound
             .write_all(b"HTTP/1.1 400 Invalid Request\r\n\r\n")
             .await?;
-        Err(format!("HTTP_PROXY invalid request length={}", pre_len))?
+        Err(format!("PROXY {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, 
+            "HTTP_PROXY invalid request length"))?
     }
 
     let mut is_conn = 1;
@@ -252,10 +256,7 @@ async fn setup_bridge(
         Ok(stream) => stream,
         Err(e) => {
             bridge.inbound.shutdown().await?;
-            Err(format!(
-                "Cannot connect to {}:{}|{:?}, Error:{:?}",
-                bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
-            ))?
+            Err(format!("Bridge1 {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, e))?
         }
     };
 
@@ -264,30 +265,21 @@ async fn setup_bridge(
     if let Err(e) = stream_s.writable().await {
         bridge.inbound.shutdown().await?;
         stream_s.shutdown().await?;
-        Err(format!(
-            "Cannot writable (outbound) to {}:{}|{:?}, Error:{:?}",
-            bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
-        ))?
+        Err(format!("Bridge2 {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, e))?
     }
     // None CONNECT mode, we should forward the request to server directly.
     if pre_len > 0 {
         if let Err(e) = stream_s.write_all(&bridge.msg_buffer[..pre_len]).await {
             bridge.inbound.shutdown().await?;
             stream_s.shutdown().await?;
-            Err(format!(
-                "Cannot write (outbound) to {}:{}|{:?}, Error:{:?}",
-                bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
-            ))?
+            Err(format!("Bridge3 {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, e))?
         }
     }
     // Response to client: HTTP Proxy - HTTP/1.1 100; CONNECT - HTTP/1.1 200
     if let Err(e) = bridge.inbound.write_all(&resp).await {
         bridge.inbound.shutdown().await?;
         stream_s.shutdown().await?;
-        Err(format!(
-            "Cannot write (inbound) to {}:{}|{:?}, Error:{:?}",
-            bridge.remote_name, bridge.remote_port, bridge.remote_addr, e
-        ))?
+        Err(format!("Bridge4 {}/{}:{} - {}", bridge.remote_name, bridge.remote_addr, bridge.remote_port, e))?
     }
     // Connected
     zero_copy_bidirectional(&mut bridge.inbound, &mut stream_s).await?;
